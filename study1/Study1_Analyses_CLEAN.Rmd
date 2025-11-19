@@ -1,0 +1,1220 @@
+---
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r Load packages, include=FALSE, warning=FALSE}
+library(tidyverse)      # All the things (data wrangling, plotting, etc.)
+library(psych)          # Descriptives (describe, etc.)
+library(knitr)          # For tables (if needed)
+library(lme4)           # Mixed-effects models
+library(interactions)   # Simple slopes, probing interactions
+library(partR2)         # Variance partitioning for mixed models
+
+# citations
+# citation("tidyverse")
+```
+
+```{r Load data}
+# Note: Three rows were removed prior to import because worker IDs were duplicated.
+# Worker ID variable was removed entirely afterward for anonymity.
+
+dat <- read.csv(
+  "Democracy_S1.csv",
+  na.strings  = "NA",
+  strip.white = TRUE
+)
+
+N_original <- nrow(dat)  # Track initial N
+
+
+# ----- Exclude cases with missing data on key variables -----
+# These variables are required for the main analyses.
+required_vars <- c(
+  "Voter1Sup", "Voter1Dem",
+  "Election1Sup", "Election1Dem",
+  "Compromise1Sup", "Compromise1Dem",
+  "Party"
+)
+
+dat <- dat %>%
+  filter(if_all(all_of(required_vars), ~ !is.na(.)))
+
+N_nonmissing <- nrow(dat)
+N_missing    <- N_original - N_nonmissing
+
+
+# ----- Exclude attention-check failures -----
+# Consistent with pre-registration: only ATTN == 3 (full pass)
+dat <- dat %>%
+  filter(ATTN == 3)
+
+N_passedATTN <- nrow(dat)
+N_failedATTN <- N_nonmissing - N_passedATTN
+
+
+# ----- Exclude pure moderates (PartyID == 0) -----
+# These participants cannot experience in-party advantage,
+# even though this wasn’t stated explicitly in preregistration.
+
+dat <- dat %>%
+  mutate(
+    PartyLean = replace_na(PartyLean, 0),
+    PartyDem  = replace_na(PartyDem, 0),
+    PartyRep  = replace_na(PartyRep, 0),
+    PartyID   = PartyLean + PartyDem + PartyRep
+  ) %>%
+  filter(PartyID != 0)
+
+N_partisan  <- nrow(dat)
+N_moderates <- N_passedATTN - N_partisan
+
+
+# ----- Sample flow diagnostics -----
+# These document each exclusion step.
+list(
+  N_original       = N_original,
+  N_missing        = N_missing,
+  N_failedATTN     = N_failedATTN,
+  N_moderates      = N_moderates,
+  N_final_analytic = nrow(dat)
+)
+```
+
+```{r Demographics and recoding}
+
+# Duration in minutes (raw survey length)
+psych::describe(dat$Duration..in.seconds. / 60)
+hist(dat$Duration..in.seconds. / 60)
+
+# ----- Age -----
+psych::describe(dat$Age)
+hist(dat$Age)
+
+# ----- Gender -----
+# Gender coding:
+# 1 = Man, 2 = Woman, 3 = Other
+table(dat$Gender)
+gender_counts <- table(dat$Gender)
+gender_pct <- round(100 * gender_counts / nrow(dat), 1)
+gender_pct  # clean summary for quick reference
+
+
+# ----- Race -----
+# Race was coded as a string; some responses include multiple selections ("x,y")
+# We're gonna summarize both single-race and multiracial responses
+table(dat$Race)
+
+single_race_counts <- sapply(1:7, function(x) sum(dat$Race == as.character(x)))
+multiracial_count  <- sum(grepl(",", dat$Race) | dat$Race == "8")
+
+race_pct <- c(single_race_counts, Multiracial = multiracial_count) / nrow(dat) * 100
+names(race_pct) <- c(
+  "White", "Black or African American", "Native Hawaiian or Alaska Native",
+  "Latino/a", "Asian/Asian-American", "Pacific Islander", 
+  "Biracial/Multiracial", "Multiracial"
+)
+# Sort and format for readability
+race_pct_sorted <- sort(race_pct, decreasing = TRUE)
+race_pct_sorted <- round(race_pct_sorted, 2)
+race_pct_sorted  # Final race demographic summary
+
+
+# ----- Party Identification -----
+hist(dat$PartyID)
+table(dat$PartyID)
+
+# Percent Democrats
+dem_n  <- sum(dat$PartyID <= -1)
+dem_pct <- round(100 * dem_n / nrow(dat), 1)
+
+# Percent Republicans
+rep_n  <- sum(dat$PartyID >= 1)
+rep_pct <- round(100 * rep_n / nrow(dat), 1)
+
+c(Democrats = dem_pct, Republicans = rep_pct)
+
+# Dichotomous party ID ("Dem", "Rep")
+dat <- dat %>%
+  mutate(
+    PartyDi = case_when(
+      PartyID <= -1 ~ "Dem",
+      PartyID >=  1 ~ "Rep",
+      TRUE          ~ NA_character_
+    )
+  )
+
+# ----- Political Ideology -----
+dat <- dat %>%
+  mutate(
+    POLean = replace_na(POLean, 0),
+    POLib  = replace_na(POLib, 0),
+    POCon  = replace_na(POCon, 0),
+    PolID  = POLean + POLib + POCon
+  )
+
+hist(dat$PolID)
+table(dat$PolID)
+
+# ----- Party ID: rescale to -1 to 1 -----
+# Convert raw -4 to +4 scale to an equal-interval -1 to 1 scale
+# coding over pure independents, which we excluded
+party_map <- c(
+  "-4" = -1.0000, "-3" = -0.7143, "-2" = -0.4286, "-1" = -0.1429,
+   "1" =  0.1429,  "2" =  0.4286,  "3" =  0.7143,  "4" =  1.0000
+)
+
+dat <- dat %>%
+  mutate(
+    PartyID = as.character(PartyID),
+    PartyID = party_map[PartyID] %>% as.numeric()
+  )
+
+# ----- Binary Republican indicator (0 = Dem, 1 = Rep) -----
+# Based on rescaled PartyID: negative = Dem, positive = Rep
+dat <- dat %>%
+  mutate(
+    Republican = case_when(
+      PartyID < 0  ~ 0,
+      PartyID > 0  ~ 1,
+      TRUE         ~ NA_real_
+    )
+  )
+
+# ----- Fix typo in variable name -----
+dat <- dat %>% rename(Compromise1GovParty = Compromis1GovParty)
+```
+
+```{r Convert data from wide to long format}
+
+# Unique participant ID
+dat <- dat %>%
+  mutate(ID = row_number())
+
+# Fix conflicting column names before reshaping
+dat <- dat %>%
+  rename(
+    Voter1PartyHelp      = Voter1Party,
+    Election1PartyHelp   = Election1Party,
+    Compromise1PartyHelp = Compromise1Party
+  )
+
+# Pivot vignette responses into long format
+dat_long <- dat %>%
+  pivot_longer(
+    cols = matches("^(Voter1|Election1|Compromise1)"),
+    names_to = c("Category", ".value"),
+    names_pattern = "^(Voter1|Election1|Election1|Compromise1)(.*)"
+  ) %>%
+  mutate(
+    Voter1      = as.integer(Category == "Voter1"),
+    Election1   = as.integer(Category == "Election1"),
+    Compromise1 = as.integer(Category == "Compromise1")
+  ) %>%
+  dplyr::select(-Category)
+
+# ----- Code inparty advantage -----
+
+# For Voter1 condition
+dat_long <- dat_long %>%
+  mutate(
+    InpartyAdv = case_when(
+      Voter1 == 1 & Inparty == VLoser ~ -1,
+      Voter1 == 1 & Outparty == VLoser ~ 1,
+      Voter1 == 1 & VLoser == "" ~ 0,
+      TRUE ~ NA_real_
+    )
+  )
+
+# For Election1 condition
+dat_long <- dat_long %>%
+  mutate(
+    InpartyAdv = case_when(
+      Election1 == 1 & Inparty == EWinner ~ 1,
+      Election1 == 1 & Outparty == EWinner ~ -1,
+      Election1 == 1 & EWinner == "" ~ 0,
+      TRUE ~ InpartyAdv
+    )
+  )
+
+# For Compromise1 condition
+dat_long <- dat_long %>%
+  mutate(
+    InpartyAdv = case_when(
+      Compromise1 == 1 & Inparty == CompromiseGov ~ 1,
+      Compromise1 == 1 & Outparty == CompromiseGov ~ -1,
+      Compromise1 == 1 & CompromiseGov == "" ~ 0,
+      TRUE ~ InpartyAdv
+    )
+  )
+
+# ----- Verify each participant has consistent InpartyAdv values -----
+# each should have 3 unique levels per within-subjects design
+unique_check <- dat_long %>%
+  group_by(ID) %>%
+  summarise(
+    all_unique = n_distinct(InpartyAdv, na.rm = TRUE) == sum(!is.na(InpartyAdv)),
+    .groups = "drop"
+  )
+# Quick look
+head(unique_check)
+# True means no issues; FALSE would indicate a coding problem
+any(unique_check$all_unique == FALSE)
+
+# ----- Rescale Dem, Sup, Fair to [-1, 1] -----
+dat_long <- dat_long %>%
+  mutate(
+    Dem  = Dem  / 3,
+    Sup  = Sup  / 3,
+    Fair = Fair / 3
+  )
+
+# Visualize distributions
+hist(dat_long$Dem)
+hist(dat_long$Sup)
+hist(dat_long$Fair)
+
+# ----- Participant perceptions of party advantage (Meta-perceptions) -----
+# 1 = inparty, 0 = neither, -1 = outparty
+dat_long <- dat_long %>%
+  mutate(
+    InPartyAdvMeta = case_when(
+      Inparty == "Democrat"   & PartyHelp == -1 ~ 1,
+      Inparty == "Republican" & PartyHelp ==  1 ~ 1,
+      PartyHelp == 0                          ~ 0,
+      TRUE                                    ~ -1
+    )
+  )
+
+dat_long <- dat_long %>%
+  mutate(
+    GovPartyMeta = case_when(
+      Inparty == "Democrat"   & GovParty == -1 ~ 1,
+      Inparty == "Republican" & GovParty ==  1 ~ 1,
+      GovParty == 0                           ~ 0,
+      TRUE                                    ~ -1
+    )
+  )
+
+# ----- Policy type -----
+dat_long <- dat_long %>%
+  mutate(
+    PolicyType = case_when(
+      Voter1 == 1      ~ "Voter",
+      Election1 == 1   ~ "Election",
+      Compromise1 == 1 ~ "Compromise",
+      TRUE             ~ NA_character_
+    )
+  )
+
+# ----- Dummy codes -----
+
+dat_long <- dat_long %>%
+  mutate(
+    InpartyAdv_Dum        = as.integer(InpartyAdv ==  1),
+    InpartyDisadv_Dum     = as.integer(InpartyAdv == -1),
+    InpartyAdvMeta_Dum    = as.integer(InPartyAdvMeta ==  1),
+    InpartyDisadvMeta_Dum = as.integer(InPartyAdvMeta == -1)
+  )
+
+```
+
+```{r FUNCTION | apa_summary | Display in-text-style stats for regular and mixed effects models}
+# ----- Function: apa_summary() -----
+# Formats fixed effects into APA-style strings for in-text reporting.
+# Works with both regular linear models (lm) and mixed models (lmer).
+
+apa_summary <- function(model) {
+
+  # Extract fixed effects table
+  fe <- as.data.frame(summary(model)$coefficients)
+
+  # Pre-allocate formatted output
+  formatted <- character(nrow(fe))
+
+  for (i in seq_len(nrow(fe))) {
+
+    term <- rownames(fe)[i]
+    beta <- round(fe$Estimate[i], 2)
+    se   <- round(fe$`Std. Error`[i], 2)
+    pval <- fe$`Pr(>|t|)`[i]
+
+    # 95% CI
+    ci_lower <- round(beta - 1.96 * se, 2)
+    ci_upper <- round(beta + 1.96 * se, 2)
+
+    # APA p-value formatting
+    pval_formatted <- if (pval < .001) {
+      "p < .001"
+    } else if (pval < .05) {
+      sprintf("p = %.3f", pval)
+    } else {
+      sprintf("p = %.2f", pval)
+    }
+
+    # Construct final string
+    formatted[i] <- sprintf(
+      "%s: b = %.2f, SE = %.2f, 95%% CI [%.2f, %.2f], %s",
+      term, beta, se, ci_lower, ci_upper, pval_formatted
+    )
+  }
+
+  formatted
+}
+
+# ----- Example usage -----
+library(car)
+# Simple example with lm() using mtcars dataset
+example_model <- lm(mpg ~ cyl + disp + hp + wt, data = mtcars)
+apa_summary(example_model)
+```
+
+*Run all code above here*
+
+```{r Descriptives}
+
+# Support (Sup)
+round(mean(dat_long$Sup, na.rm = TRUE), 2)
+round(sd(dat_long$Sup, na.rm = TRUE), 2)
+hist(dat_long$Sup)
+describe(dat_long$Sup)
+
+# Democratic fairness belief (Dem)
+round(mean(dat_long$Dem, na.rm = TRUE), 2)
+round(sd(dat_long$Dem, na.rm = TRUE), 2)
+hist(dat_long$Dem)
+describe(dat_long$Dem)
+
+# Correlation between Dem and Sup
+round(cor(dat_long$Dem, dat_long$Sup, use = "complete.obs"),2)
+
+```
+
+```{r Correlations table}
+
+library(apaTables)
+cormat <- dat_long %>%
+  dplyr::select(
+    PartyID,
+    InpartyAdv_Dum, InpartyDisadv_Dum,
+    Dem, Sup,
+    Voter1, Election1, Compromise1
+  )
+
+# APA-style correlation table (printed in console)
+apa.cor.table(cormat)
+# save to Word doc
+# apa.cor.table(cormat, filename = "Study1CorTable.doc")
+
+```
+
+***Main Analyses***
+
+```{r FUNCTION | Get combined variance explained by partisan vs. 'principled' factors}
+# ----- Helper: summarize grouped partR2 results (for non-bootstrapped partR2) -----
+
+summarize_partR2 <- function(pr2_object) {
+
+  # Extract R2 table (predictor semi-partial and full model R2)
+  prtab <- pr2_object$R2
+
+  # Full model R2
+  full_r2 <- prtab$estimate[prtab$term == "Full"]
+
+  # Drop the "Full" row so we're left with predictors only
+  prtab <- prtab[prtab$term != "Full", ]
+
+  preds <- prtab$term
+  vals  <- prtab$estimate
+
+  # Define theoretical groupings
+  groups <- list(
+    Principle           = c("Voter1", "Compromise1"),
+    Partisan            = c("InpartyAdv_Dum", "InpartyDisadv_Dum"),
+    Principle_Asymmetry = c("PartyID:Voter1", "PartyID:Compromise1"),
+    Partisan_Asymmetry  = c("PartyID:InpartyAdv_Dum", "PartyID:InpartyDisadv_Dum")
+  )
+
+  # Compute sums for each group
+  out <- lapply(groups, function(g) sum(vals[preds %in% g], na.rm = TRUE))
+
+  # Add full model R2
+  out$Full_Model_R2 <- full_r2
+
+  return(out)
+}
+```
+
+```{r MAIN ANALYSES | DV: Support}
+# ----- Mixed-effects models predicting Support (Sup) -----
+
+# Main effects model (Bipartisan Rationalization)
+mod_sup_main <- lmerTest::lmer(
+  Sup ~ PartyID + Voter1 + Compromise1 +
+    InpartyAdv_Dum + InpartyDisadv_Dum +
+    (1 | ID),
+  data = dat_long,
+  REML = FALSE
+)
+
+summary(mod_sup_main)
+cat(apa_summary(mod_sup_main), sep = "\n")
+
+pr2_main <- partR2(
+  mod_sup_main,
+  partvars = c("PartyID", "Voter1", "Compromise1",
+               "InpartyAdv_Dum", "InpartyDisadv_Dum"),
+  data = dat_long,
+  max_level = 1,
+  nboot = NULL
+)
+pr2_main
+
+# ----- Interaction model (PartyID moderation across predictors) -----
+
+mod_sup_interactions <- lmerTest::lmer(
+  Sup ~ PartyID +
+    Voter1 * PartyID +
+    Compromise1 * PartyID +
+    InpartyAdv_Dum * PartyID +
+    InpartyDisadv_Dum * PartyID +
+    (1 | ID),
+  data = dat_long,
+  REML = FALSE
+)
+
+summary(mod_sup_interactions)
+cat(apa_summary(mod_sup_interactions), sep = "\n")
+
+pr2_int <- partR2(
+  mod_sup_interactions,
+  partvars = c(
+    "PartyID", "Voter1", "Compromise1",
+    "InpartyAdv_Dum", "InpartyDisadv_Dum",
+    "PartyID:Voter1", "PartyID:Compromise1",
+    "PartyID:InpartyAdv_Dum", "PartyID:InpartyDisadv_Dum"
+  ),
+  data = dat_long,
+  max_level = 1,
+  nboot = NULL
+)
+
+# Analyze combined variance per partisan and principled hypotheses
+summarize_partR2(pr2_int)
+
+# See if interactions model fits the data better than the main effects model
+anova(mod_sup_interactions, mod_sup_main)
+
+# ----- Simple slopes for interaction effects -----
+sim_slopes(
+  model = mod_sup_interactions,
+  pred = Voter1,
+  modx = PartyID,
+  modx.values = c(-sd(dat_long$PartyID), sd(dat_long$PartyID)),
+  confint = TRUE, ci.width = 0.95,
+  modx.labels = c("Democrats", "Republicans"),
+  digits = 2
+)
+
+sim_slopes(
+  model = mod_sup_interactions,
+  pred = Compromise1,
+  modx = PartyID,
+  modx.values = c(-sd(dat_long$PartyID), sd(dat_long$PartyID)),
+  confint = TRUE, ci.width = 0.95,
+  modx.labels = c("Democrats", "Republicans"),
+  digits = 2
+)
+
+sim_slopes(
+  model = mod_sup_interactions,
+  pred = InpartyAdv_Dum,
+  modx = PartyID,
+  modx.values = c(-sd(dat_long$PartyID), sd(dat_long$PartyID)),
+  confint = TRUE, ci.width = 0.95,
+  modx.labels = c("Democrats", "Republicans"),
+  digits = 2
+)
+
+sim_slopes(
+  model = mod_sup_interactions,
+  pred = InpartyDisadv_Dum,
+  modx = PartyID,
+  modx.values = c(-sd(dat_long$PartyID), sd(dat_long$PartyID)),
+  confint = TRUE, ci.width = 0.95,
+  modx.labels = c("Democrats", "Republicans"),
+  digits = 2
+)
+```
+
+```{r Supplemental Analyses | Support ~ *perceived* advantage}
+# ----- Perceived inparty advantage model -----
+
+mod_sup_meta <- lmerTest::lmer(
+  Sup ~ PartyID +
+    Voter1 * PartyID +
+    Compromise1 * PartyID +
+    InpartyAdvMeta_Dum * PartyID +
+    InpartyDisadvMeta_Dum * PartyID +
+    (1 | ID),
+  data = dat_long,
+  REML = FALSE
+)
+
+summary(mod_sup_meta)
+cat(apa_summary(mod_sup_meta), sep = "\n")
+
+# ----- Simple slopes for interaction effects -----
+sim_slopes(
+  model = mod_sup_meta,
+  pred = Voter1,
+  modx = PartyID,
+  modx.values = c(-sd(dat_long$PartyID), sd(dat_long$PartyID)),
+  confint = TRUE, ci.width = 0.95,
+  modx.labels = c("Democrats", "Republicans"),
+  digits = 2
+)
+
+sim_slopes(
+  model = mod_sup_meta,
+  pred = Compromise1,
+  modx = PartyID,
+  modx.values = c(-sd(dat_long$PartyID), sd(dat_long$PartyID)),
+  confint = TRUE, ci.width = 0.95,
+  modx.labels = c("Democrats", "Republicans"),
+  digits = 2
+)
+
+sim_slopes(
+  model = mod_sup_meta,
+  pred = InpartyDisadvMeta_Dum,
+  modx = PartyID,
+  modx.values = c(-sd(dat_long$PartyID), sd(dat_long$PartyID)),
+  confint = TRUE, ci.width = 0.95,
+  modx.labels = c("Democrats", "Republicans"),
+  digits = 2
+)
+
+```
+
+```{r MAIN ANALYSES | DV: Perceived Democracy}
+# ----- Mixed-effects models predicting Perceived Democracy (Dem) -----
+
+# Main effects model (Bipartisan Rationalization)
+mod_dem_main <- lmerTest::lmer(
+  Dem ~ PartyID + Voter1 + Compromise1 +
+    InpartyAdv_Dum + InpartyDisadv_Dum +
+    (1 | ID),
+  data = dat_long,
+  REML = FALSE
+)
+
+summary(mod_dem_main)
+cat(apa_summary(mod_dem_main), sep = "\n")
+
+pr2_main <- partR2(
+  mod_dem_main,
+  partvars = c("PartyID", "Voter1", "Compromise1",
+               "InpartyAdv_Dum", "InpartyDisadv_Dum"),
+  data = dat_long,
+  max_level = 1,
+  nboot = NULL
+)
+pr2_main
+
+# ----- Interaction model (PartyID moderation across predictors) -----
+
+mod_dem_interactions <- lmerTest::lmer(
+  Dem ~ PartyID +
+    Voter1 * PartyID +
+    Compromise1 * PartyID +
+    InpartyAdv_Dum * PartyID +
+    InpartyDisadv_Dum * PartyID +
+    (1 | ID),
+  data = dat_long,
+  REML = FALSE
+)
+
+summary(mod_dem_interactions)
+cat(apa_summary(mod_dem_interactions), sep = "\n")
+
+pr2_int <- partR2(
+  mod_dem_interactions,
+  partvars = c(
+    "PartyID", "Voter1", "Compromise1",
+    "InpartyAdv_Dum", "InpartyDisadv_Dum",
+    "PartyID:Voter1", "PartyID:Compromise1",
+    "PartyID:InpartyAdv_Dum", "PartyID:InpartyDisadv_Dum"
+  ),
+  data = dat_long,
+  max_level = 1,
+  nboot = NULL
+)
+
+# Analyze combined variance per partisan and principled hypotheses
+summarize_partR2(pr2_int)
+
+# See if interactions model fits the data better than the main effects model
+anova(mod_dem_interactions, mod_dem_main)
+
+# ----- Simple slopes for interaction effects -----
+sim_slopes(
+  model = mod_dem_interactions,
+  pred = Voter1,
+  modx = PartyID,
+  modx.values = c(-sd(dat_long$PartyID), sd(dat_long$PartyID)),
+  confint = TRUE, ci.width = 0.95,
+  modx.labels = c("Democrats", "Republicans"),
+  digits = 2
+)
+
+sim_slopes(
+  model = mod_dem_interactions,
+  pred = Compromise1,
+  modx = PartyID,
+  modx.values = c(-sd(dat_long$PartyID), sd(dat_long$PartyID)),
+  confint = TRUE, ci.width = 0.95,
+  modx.labels = c("Democrats", "Republicans"),
+  digits = 2
+)
+
+sim_slopes(
+  model = mod_dem_interactions,
+  pred = InpartyAdv_Dum,
+  modx = PartyID,
+  modx.values = c(-sd(dat_long$PartyID), sd(dat_long$PartyID)),
+  confint = TRUE, ci.width = 0.95,
+  modx.labels = c("Democrats", "Republicans"),
+  digits = 2
+)
+
+sim_slopes(
+  model = mod_dem_interactions,
+  pred = InpartyDisadv_Dum,
+  modx = PartyID,
+  modx.values = c(-sd(dat_long$PartyID), sd(dat_long$PartyID)),
+  confint = TRUE, ci.width = 0.95,
+  modx.labels = c("Democrats", "Republicans"),
+  digits = 2
+)
+```
+
+```{r Supplemental Analyses | DV: Fairness}
+# ----- Mixed-effects models predicting Fairport (Fair) -----
+
+# Main effects model
+mod_fair_main <- lmerTest::lmer(
+  Fair ~ PartyID + Voter1 + Compromise1 +
+    InpartyAdv_Dum + InpartyDisadv_Dum +
+    (1 | ID),
+  data = dat_long,
+  REML = FALSE
+)
+
+summary(mod_fair_main)
+cat(apa_summary(mod_fair_main), sep = "\n")
+
+pr2_main <- partR2(
+  mod_fair_main,
+  partvars = c("PartyID", "Voter1", "Compromise1",
+               "InpartyAdv_Dum", "InpartyDisadv_Dum"),
+  data = dat_long,
+  max_level = 1,
+  nboot = NULL
+)
+pr2_main
+
+# ----- Interaction model (PartyID moderation across predictors) -----
+
+mod_fair_interactions <- lmerTest::lmer(
+  Fair ~ PartyID +
+    Voter1 * PartyID +
+    Compromise1 * PartyID +
+    InpartyAdv_Dum * PartyID +
+    InpartyDisadv_Dum * PartyID +
+    (1 | ID),
+  data = dat_long,
+  REML = FALSE
+)
+
+summary(mod_fair_interactions)
+cat(apa_summary(mod_fair_interactions), sep = "\n")
+
+pr2_int <- partR2(
+  mod_fair_interactions,
+  partvars = c(
+    "PartyID", "Voter1", "Compromise1",
+    "InpartyAdv_Dum", "InpartyDisadv_Dum",
+    "PartyID:Voter1", "PartyID:Compromise1",
+    "PartyID:InpartyAdv_Dum", "PartyID:InpartyDisadv_Dum"
+  ),
+  data = dat_long,
+  max_level = 1,
+  nboot = NULL
+)
+
+# Analyze combined variance
+summarize_partR2(pr2_int)
+
+# See if interactions model fits the data better than the main effects model
+anova(mod_fair_interactions, mod_fair_main)
+
+# ----- Simple slopes for interaction effects -----
+sim_slopes(
+  model = mod_fair_interactions,
+  pred = Voter1,
+  modx = PartyID,
+  modx.values = c(-sd(dat_long$PartyID), sd(dat_long$PartyID)),
+  confint = TRUE, ci.width = 0.95,
+  modx.labels = c("Democrats", "Republicans"),
+  digits = 2
+)
+
+sim_slopes(
+  model = mod_fair_interactions,
+  pred = Compromise1,
+  modx = PartyID,
+  modx.values = c(-sd(dat_long$PartyID), sd(dat_long$PartyID)),
+  confint = TRUE, ci.width = 0.95,
+  modx.labels = c("Democrats", "Republicans"),
+  digits = 2
+)
+
+sim_slopes(
+  model = mod_fair_interactions,
+  pred = InpartyAdv_Dum,
+  modx = PartyID,
+  modx.values = c(-sd(dat_long$PartyID), sd(dat_long$PartyID)),
+  confint = TRUE, ci.width = 0.95,
+  modx.labels = c("Democrats", "Republicans"),
+  digits = 2
+)
+
+sim_slopes(
+  model = mod_fair_interactions,
+  pred = InpartyDisadv_Dum,
+  modx = PartyID,
+  modx.values = c(-sd(dat_long$PartyID), sd(dat_long$PartyID)),
+  confint = TRUE, ci.width = 0.95,
+  modx.labels = c("Democrats", "Republicans"),
+  digits = 2
+)
+```
+
+***Figures***
+
+Figure 1
+```{r GRAPH | Sup by Inparty Advantage & Party | Jittered raw data with CIs | Grayscale-friendly}
+# Color + shape (grayscale-friendly, no CI linetype differences)
+my_plot <- ggplot(
+  dat_long,
+  aes(x = Party.1, y = Sup)
+) +
+  geom_jitter(
+    aes(color = Party.1, shape = Party.1, fill = Party.1),
+    width  = 0.35,
+    alpha  = 0.35,
+    size   = 1.2,
+    stroke = 0.6
+  ) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom     = "errorbar",
+    width    = 0.5,
+    color    = "black",
+    size     = 0.6
+  ) +
+  stat_summary(
+    fun   = mean,
+    geom  = "point",
+    shape = 21,
+    fill  = "black",
+    color = "black",
+    size  = 2,
+    inherit.aes = FALSE,
+    aes(x = Party.1, y = Sup)
+  ) +
+  facet_wrap(
+    ~ InpartyAdv,
+    ncol   = 3,
+    switch = "x",
+    labeller = labeller(InpartyAdv = c(
+      `-1` = "Hurt\nInparty",
+      `0`  = "Neutral",
+      `1`  = "Help\nInparty"
+    ))
+  ) +
+  # Color for online version, shape for grayscale version
+  scale_color_manual(
+    name   = "Party Affiliation",
+    values = c(
+      "Democrat"   = "#377eb8",
+      "Republican" = "#e41a1c"
+    )
+  ) +
+  scale_fill_manual(
+    name   = "Party Affiliation",
+    values = c(
+      "Democrat"   = "#377eb8",
+      "Republican" = "#e41a1c"
+    )
+  ) +
+  scale_shape_manual(
+    name   = "Party Affiliation",
+    values = c(
+      "Democrat"   = 21,  # circle
+      "Republican" = 24   # triangle
+    )
+  ) +
+  labs(
+    x = NULL,
+    y = "Oppose        |       Support "
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5, stroke = 1)),
+    shape = guide_legend(override.aes = list(size = 5, stroke = 1)),
+    fill  = "none"
+  ) +
+  theme_minimal() +
+  theme(
+    text             = element_text(size = 16),
+    axis.text.x      = element_blank(),
+    axis.title.y     = element_text(size = 14),
+    legend.title     = element_text(size = 16),
+    legend.text      = element_text(size = 16),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background  = element_rect(fill = "white", color = NA)
+  )
+my_plot
+
+# ggsave(
+#   "Figure1.jpg",
+#   plot   = my_plot,
+#   width  = 10,
+#   height = 6,
+#   dpi    = 300
+# )
+```
+
+Figure 2
+```{r GRAPH | Dem by Inparty Advantage & Party | Jittered raw data with CIs | Grayscale-friendly}
+# Color + shape (grayscale-friendly, no CI linetype differences)
+my_plot <- ggplot(
+  dat_long,
+  aes(x = Party.1, y = Dem)
+) +
+  geom_jitter(
+    aes(color = Party.1, shape = Party.1, fill = Party.1),
+    width  = 0.35,
+    alpha  = 0.35,
+    size   = 1.2,
+    stroke = 0.6
+  ) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom     = "errorbar",
+    width    = 0.5,
+    color    = "black",
+    size     = 0.6
+  ) +
+  stat_summary(
+    fun   = mean,
+    geom  = "point",
+    shape = 21,
+    fill  = "black",
+    color = "black",
+    size  = 2,
+    inherit.aes = FALSE,
+    aes(x = Party.1, y = Dem)
+  ) +
+  facet_wrap(
+    ~ InpartyAdv,
+    ncol   = 3,
+    switch = "x",
+    labeller = labeller(InpartyAdv = c(
+      `-1` = "Hurt\nInparty",
+      `0`  = "Neutral",
+      `1`  = "Help\nInparty"
+    ))
+  ) +
+  # Color for online version, shape for grayscale version
+  scale_color_manual(
+    name   = "Party Affiliation",
+    values = c(
+      "Democrat"   = "#377eb8",
+      "Republican" = "#e41a1c"
+    )
+  ) +
+  scale_fill_manual(
+    name   = "Party Affiliation",
+    values = c(
+      "Democrat"   = "#377eb8",
+      "Republican" = "#e41a1c"
+    )
+  ) +
+  scale_shape_manual(
+    name   = "Party Affiliation",
+    values = c(
+      "Democrat"   = 21,  # circle
+      "Republican" = 24   # triangle
+    )
+  ) +
+  labs(
+    x = NULL,
+    y = "Undemocratic       |       Democratic    ",
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5, stroke = 1)),
+    shape = guide_legend(override.aes = list(size = 5, stroke = 1)),
+    fill  = "none"
+  ) +
+  theme_minimal() +
+  theme(
+    text             = element_text(size = 16),
+    axis.text.x      = element_blank(),
+    axis.title.y     = element_text(size = 14),
+    legend.title     = element_text(size = 16),
+    legend.text      = element_text(size = 16),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background  = element_rect(fill = "white", color = NA)
+  )
+my_plot
+
+
+# ggsave(
+#   "Figure2.jpg",
+#   plot   = my_plot,
+#   width  = 10,
+#   height = 6,
+#   dpi    = 300
+# )
+```
+
+Figure 3
+```{r GRAPH | Sup by Principle Violated & Party | Jittered raw data with CIs | Grayscale-friendly}
+# Color + shape (grayscale-friendly, no CI linetype differences)
+my_plot <- ggplot(
+  dat_long,
+  aes(x = Party.1, y = Sup)
+) +
+  geom_jitter(
+    aes(color = Party.1, shape = Party.1, fill = Party.1),
+    width  = 0.35,
+    alpha  = 0.35,
+    size   = 1.2,
+    stroke = 0.6
+  ) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom     = "errorbar",
+    width    = 0.5,
+    color    = "black",
+    size     = 0.6
+  ) +
+  stat_summary(
+    fun   = mean,
+    geom  = "point",
+    shape = 21,
+    fill  = "black",
+    color = "black",
+    size  = 2,
+    inherit.aes = FALSE,
+    aes(x = Party.1, y = Sup)
+  ) +
+  facet_wrap(~ PolicyType, ncol = 3, switch = "x", 
+             labeller = labeller(PolicyType = c(
+               "Compromise" = "Compromise", 
+               "Election" = "Election\nSecurity",
+               "Voter" = "Voter\nAccess"))) +
+  # Color for online version, shape for grayscale version
+  scale_color_manual(
+    name   = "Party Affiliation",
+    values = c(
+      "Democrat"   = "#377eb8",
+      "Republican" = "#e41a1c"
+    )
+  ) +
+  scale_fill_manual(
+    name   = "Party Affiliation",
+    values = c(
+      "Democrat"   = "#377eb8",
+      "Republican" = "#e41a1c"
+    )
+  ) +
+  scale_shape_manual(
+    name   = "Party Affiliation",
+    values = c(
+      "Democrat"   = 21,  # circle
+      "Republican" = 24   # triangle
+    )
+  ) +
+  labs(
+    x = NULL,
+    y = "Oppose        |       Support "
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5, stroke = 1)),
+    shape = guide_legend(override.aes = list(size = 5, stroke = 1)),
+    fill  = "none"
+  ) +
+  theme_minimal() +
+  theme(
+    text             = element_text(size = 16),
+    axis.text.x      = element_blank(),
+    axis.title.y     = element_text(size = 14),
+    legend.title     = element_text(size = 16),
+    legend.text      = element_text(size = 16),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background  = element_rect(fill = "white", color = NA)
+  )
+my_plot
+
+
+# ggsave(
+#   "Figure3.jpg",
+#   plot   = my_plot,
+#   width  = 10,
+#   height = 6,
+#   dpi    = 300
+# )
+```
+
+***Extra Analyses***
+
+```{r Supplemental Analyses #8 | Analyses Using only First Vignette Seen}
+
+# Done to determine if multiple trials affected results
+
+library(rsq)
+library(stringr)
+
+# Clean vignette order fields
+dat_long <- dat_long %>%
+  mutate(
+    FL_73_DO  = na_if(FL_73_DO, ""),
+    FL_115_DO = na_if(FL_115_DO, ""),
+    Order     = if_else(!is.na(FL_73_DO), FL_73_DO, FL_115_DO)
+  )
+
+table(dat_long$Order)
+
+# Extract first word from order string (e.g., "Voter123" → "Voter")
+dat_long <- dat_long %>%
+  mutate(FirstWord = str_extract(Order, "^[A-Za-z]+"))
+
+# Keep only rows for the FIRST vignette shown per participant
+filtered_dat <- dat_long %>%
+  filter(FirstWord == PolicyType)
+
+# Quick sanity check:
+table(filtered_dat$PolicyType, filtered_dat$FirstWord)
+
+# ----- Helper: partial R2 from lm() in grouped format -----
+extract_partial_r2 <- function(model) {
+  rsq.partial(model)$partial.rsq |> round(3)
+}
+
+# =========================================================
+# =============== Support (Sup) Analyses ==================
+# =========================================================
+
+# Main effects model
+mod_sup_first_main <- lm(
+  Sup ~ PartyID + Voter1 + Compromise1 +
+    InpartyAdv_Dum + InpartyDisadv_Dum,
+  data = filtered_dat
+)
+
+summary(mod_sup_first_main)
+cat(apa_summary(mod_sup_first_main), sep = "\n")
+extract_partial_r2(mod_sup_first_main)
+
+# Interaction model
+mod_sup_first_int <- lm(
+  Sup ~ PartyID +
+    Voter1 * PartyID +
+    Compromise1 * PartyID +
+    InpartyAdv_Dum * PartyID +
+    InpartyDisadv_Dum * PartyID,
+  data = filtered_dat
+)
+
+summary(mod_sup_first_int)
+cat(apa_summary(mod_sup_first_int), sep = "\n")
+extract_partial_r2(mod_sup_first_int)
+
+anova(mod_sup_first_int, mod_sup_first_main)
+
+# Effect size difference (full vs. reduced)
+0.2537 - 0.2037
+
+# =========================================================
+# ============= Perceived Democracy (Dem) =================
+# =========================================================
+
+# Main effects model
+mod_dem_first_main <- lm(
+  Dem ~ PartyID + Voter1 + Compromise1 +
+    InpartyAdv_Dum + InpartyDisadv_Dum,
+  data = filtered_dat
+)
+
+summary(mod_dem_first_main)
+cat(apa_summary(mod_dem_first_main), sep = "\n")
+extract_partial_r2(mod_dem_first_main)
+
+# Interaction model
+mod_dem_first_int <- lm(
+  Dem ~ PartyID +
+    Voter1 * PartyID +
+    Compromise1 * PartyID +
+    InpartyAdv_Dum * PartyID +
+    InpartyDisadv_Dum * PartyID,
+  data = filtered_dat
+)
+
+summary(mod_dem_first_int)
+cat(apa_summary(mod_dem_first_int), sep = "\n")
+extract_partial_r2(mod_dem_first_int)
+
+anova(mod_dem_first_int, mod_dem_first_main)
+
+# Effect size difference (full vs. reduced)
+0.1355 - 0.1064
+
+```
+
+Exploring explanations for asymmetry in Study 1 but not Study 2
+```{r Was it greater animosity on the part of Republicans?}
+
+dat %>% 
+  group_by(PartyID) %>% 
+  summarise(Animosity = mean(FeelingTherm_2, na.rm = TRUE))
+
+
+t.test(dat$FeelingTherm_2 ~ dat$Republican)
+
+# So Republicans are actually warmer about Democrats than the other way around
+
+```
+
+```{r Did Republicans moralize politics more than Democrats?}
+
+dat$MOP <- rowMeans(dat[, c("MC_MIP","MC_LIP", "MC_Environment", "MC_Abortion", 
+                            "MC_Unemployment", "MC_Immigration", "MC_Healthcare", 
+                            "MC_Education", "MC_Gun", "MC_Trade", 
+                            "MC_Inflation", "MC_Democracy")], 
+                    na.rm = TRUE)
+
+
+dat %>% 
+  group_by(PartyID) %>% 
+  summarise(MOP = mean(MOP, na.rm = TRUE))
+
+
+t.test(dat$MOP ~ dat$Republican)
+
+# no different
+```
+
+
