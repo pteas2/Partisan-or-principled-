@@ -27,23 +27,17 @@ Each study manipulates which democratic principle was violated and whether the v
 
 ## Repository structure
 
-data/
 study1/
 Democracy_S1.csv
+Study1_Analyses_CLEAN.Rmd
+
 study2/
 Democracy_S2.csv
-
-code/
-study1/
-Study1_Analyses_CLEAN.Rmd
-study2/
 Study2_Analyses_CLEAN.Rmd
 
 output/
 study1/
-figures/
 study2/
-figures/
 
 paper/
 Democracy_ACCEPTED.pdf
@@ -58,7 +52,6 @@ All analyses use:
 - tidyverse  
 - lme4  
 - lmerTest  
-- modelsummary  
 - flextable  
 
 Running the analyses
@@ -68,13 +61,13 @@ The analysis scripts are written as .Rmd files for organization and readability,
 To reproduce each study:
 	1.	Open the .Rmd file in RStudio
 	2.	Run all chunks sequentially using “Run All” or by stepping through each section
-	3.	Figures and tables will be written to the output/ directory
+	3.	Figures and tables will be written in the console/viewer. Uncomment to write files to directory
 
 Study 1:
-code/study1/Study1_Analyses_CLEAN.Rmd
+study1/Study1_Analyses_CLEAN.Rmd
 
 Study 2:
-code/study2/Study2_Analyses_CLEAN.Rmd
+study2/Study2_Analyses_CLEAN.Rmd
 
 ---
 
@@ -99,7 +92,7 @@ This suggests asymmetries are **context-dependent**, not dispositional.
 ## Citation
 
 If you use this repository, please cite: 
-Teas, P. E. (2025). Partisan or principled? Explaining political differences in attitudes about democratic norm violations. Personality and Social Psychology Bulletin.
+Teas, P. E. (2025). Partisan or principled? Explaining political differences in attitudes about democratic norm violations. Personality and Social Psychology Bulletin. 1­–16. DOI: 10.1177/01461672251372671
 
 ---
 
