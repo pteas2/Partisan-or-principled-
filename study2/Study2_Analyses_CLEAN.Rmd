@@ -1,0 +1,900 @@
+---
+editor_options:
+  chunk_output_type: console
+---
+
+```{r Notes about timing and items}
+# The "freedom of assembly" manipulation was miscoded during data collection making that condition unusable. It has been removed from all analyses below.
+```
+
+```{r Load packages}
+# ----- Load packages -----
+
+library(tidyverse)   # dplyr, tidyr, ggplot2, forcats, etc.
+library(psych)        # descriptives
+library(interactions) # simple slopes
+library(sandwich)     # robust standard errors
+library(lmtest)       # coeftest()
+library(modelsummary) # regression tables
+library(lavaan)       # SEM
+library(relaimpo)     # relative importance (LM)
+library(apaTables)    # APA-style correlation tables
+library(knitr)
+library(flextable)
+library(officer)
+```
+
+```{r Load data}
+# Prior to upload: removed identifying columns (IP Address, ResponseId:UserLanguage),
+# removed first two rows, and removed 'rid' column.
+
+dat <- read.csv(
+  "Democracy_S2.csv",
+  header       = TRUE,
+  sep          = ",",
+  na.strings   = "NA",
+  dec          = ".",
+  strip.white  = TRUE
+)
+
+# colnames(dat)
+```
+
+```{r FUNCTION | create_APA_regression_table | Nice regression table display in word doc}
+library(broom)
+library(dplyr)
+library(flextable)
+library(officer)
+library(rsq)
+
+create_APA_regression_table <- function(model, file_name = "my_regression_table.docx", save_to_word = FALSE) {
+  
+  # Extracting the coefficients into a data frame
+  coefficients <- broom::tidy(model)
+  
+  # Compute confidence intervals
+  conf_intervals <- confint(model) %>%
+    as_tibble() %>%
+    rename(conf.low = `2.5 %`, conf.high = `97.5 %`)
+  
+  # Calculate partial R-squared values
+  partial_r_squared <- suppressWarnings(rsq::rsq.partial(model)$partial.rsq)
+  
+  # Ensure the length of partial_r_squared matches the number of non-intercept terms
+  partial_r_squared <- c(NA, partial_r_squared)  # Add NA for the intercept
+  
+  # Combine the tidy output with the confidence intervals and partial R-squared
+  model_df <- bind_cols(coefficients, conf_intervals) %>%
+    mutate(partial_r2 = partial_r_squared)
+  
+  # Calculate degrees of freedom
+  model_df <- model_df %>%
+    mutate(df = summary(model)$df[2])
+  
+  # Add significance stars based on p-values
+  model_df <- model_df %>%
+    mutate(significance = case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01  ~ "**",
+      p.value < 0.05  ~ "*",
+      TRUE ~ ""
+    ))
+  
+  # Round p-values according to APA
+  model_df <- model_df %>%
+    mutate(p.value = case_when(
+      p.value < 0.001 ~ "< .001",
+      p.value < 0.01  ~ sprintf("%.3f", p.value),
+      p.value < 0.05  ~ sprintf("%.2f", p.value),
+      TRUE ~ sprintf("%.2f", p.value)
+    ))
+  
+  # Reorder columns so df comes after t-value, and significance stars right after p-value
+  model_df <- model_df %>%
+    dplyr::select(term, estimate, std.error, statistic, df, p.value, significance, partial_r2, conf.low, conf.high)
+  
+  # Round all other numeric values to 2 decimal points
+  model_df <- model_df %>%
+    mutate(across(where(is.numeric), round, 2))
+  
+  # Get overall model statistics (R-squared and overall p-value)
+  overall_r_squared <- summary(model)$r.squared
+  f_statistic <- summary(model)$fstatistic
+  model_p_value <- pf(f_statistic[1], f_statistic[2], f_statistic[3], lower.tail = FALSE)
+  
+  # Determine how to display the p-value in the note
+  model_p_value_display <- ifelse(model_p_value < 0.001, "< .001", sprintf("= %.3f", model_p_value))
+  
+  # Convert the data frame to a flextable in APA format
+  model_flextable <- model_df %>%
+    flextable() %>%
+    set_header_labels(
+      term = "Predictor", 
+      estimate = "B", 
+      std.error = "SE", 
+      statistic = "t", 
+      df = "df",
+      p.value = "p", 
+      significance = "",  # Blank header for significance stars
+      partial_r2 = "sr²",  # Label Partial R-squared column as "sr²"
+      conf.low = "CI Low", 
+      conf.high = "CI High"
+    ) %>%
+    autofit() %>%
+    align(align = "left", j = 1, part = "all") %>%  # Left-align predictors column
+    align(align = "left", j = 7, part = "all") %>%  # Left-align stars column
+    bold(part = "header") %>%
+    italic(j = 3:10, part = "header") %>%  
+    font(fontname = "Times New Roman") %>%
+    font(fontname = "Times New Roman", part = "header") %>%
+    hline_bottom(border = fp_border(color = "black", width = 2)) %>%
+    height(part = "body", height = 0.3, unit = "in") %>%
+    add_footer_lines(values = "") %>%
+    compose(
+      i = 1, j = 1, part = "footer",
+      value = as_paragraph(
+        as_i("Note:"), 
+        " * p < .05, ** p < .01, *** p < .001. Confidence intervals represent the 95% confidence interval for each coefficient. ",
+        sprintf("Model R² = %.2f, p %s.", overall_r_squared, model_p_value_display)
+      )
+    ) %>%
+    font(fontname = "Times New Roman", part = "footer")  # Set font for footer
+  
+  # Display the flextable
+  print(model_flextable)
+
+  # Save the flextable to a Word document (optional)
+  if (save_to_word) {
+    doc <- read_docx() %>%
+      body_add_flextable(model_flextable) %>%
+      body_add_par("", style = "Normal") # Add space after table if needed
+    
+    print(doc, target = file_name)
+  }
+  
+  # Return the flextable object (optional, for further customization)
+  return(model_flextable)
+}
+
+# Example Model using mtcars dataset
+example_model <- lm(mpg ~ cyl + disp + hp + wt, data = mtcars)
+create_APA_regression_table(example_model)
+
+# To just display the table
+# create_APA_regression_table(example_model)
+
+# To display and save the table as a Word document
+# create_APA_regression_table(example_model, save_to_word = TRUE, file_name = "my_regression_table.docx")
+```
+
+```{r Cleaning Part 1}
+# Keep only respondents who passed Lucid's "gc" completeness screen, and who have non-missing embedded demographic data
+# (Lucid embeds attention checks in gc, so no manual AC removal needed.)
+
+dat_clean <- dat %>%
+  filter(gc == 1) %>%
+  filter(
+    !is.na(zip),
+    !is.na(region),
+    !is.na(standard_hhi),
+    !is.na(standard_education_us)
+  )
+```
+
+```{r Convert from wide to long format}
+# Raw item mapping
+# Political Protections: Q62 (Dem), Q63 (Sup), Q64 (MC), Q65_1–Q65_5
+# Assembly:              Q68 (Dem), Q69 (Sup), Q70 (MC), Q71_1–Q71_5
+# Voter Access:          Q74 (Dem), Q75 (Sup), Q76 (MC), Q77_1–Q77_5
+
+# Define question groups explicitly (avoids fragile Q62:Q65_5 syntax)
+protection_items <- c("Q62", "Q63", "Q64",
+                      paste0("Q65_", 1:5))
+
+assemble_items   <- c("Q68", "Q69", "Q70",
+                      paste0("Q71_", 1:5))
+
+voter_items      <- c("Q74", "Q75", "Q76",
+                      paste0("Q77_", 1:5))
+
+all_items <- c(protection_items, assemble_items, voter_items)
+
+# Add participant ID
+dat_clean <- dat_clean %>%
+  mutate(ParticipantID = row_number())
+
+# Pivot to long format
+dat_long <- dat_clean %>%
+  pivot_longer(
+    cols = all_of(all_items),
+    names_to = "Question",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    PolicyType = case_when(
+      Question %in% protection_items ~ "Protection",
+      Question %in% assemble_items   ~ "Assemble",
+      Question %in% voter_items      ~ "Voter"
+    ),
+    Variable = case_when(
+      Question %in% c("Q62", "Q68", "Q74") ~ "Dem",
+      Question %in% c("Q63", "Q69", "Q75") ~ "Sup",
+      Question %in% c("Q64", "Q70", "Q76") ~ "MC",
+      Question %in% c("Q65_1", "Q71_1", "Q77_1") ~ "Effective",
+      Question %in% c("Q65_2", "Q71_2", "Q77_2") ~ "Intention",
+      Question %in% c("Q65_3", "Q71_3", "Q77_3") ~ "Fair",
+      Question %in% c("Q65_4", "Q71_4", "Q77_4") ~ "Typical",
+      Question %in% c("Q65_5", "Q71_5", "Q77_5") ~ "Anger"
+    )
+  ) %>%
+  dplyr::select(-Question) %>%
+  pivot_wider(
+    names_from  = Variable,
+    values_from = Value
+  ) %>%
+  # Keep only rows where one of the DV-related variables is present
+  filter(!is.na(Dem) | !is.na(Sup) | !is.na(MC))
+```
+
+```{r Recoding}
+# ----- Recoding -----
+
+# Dummy for Voter policy
+dat_long <- dat_long %>% 
+  mutate(Voter2Dummy = as.integer(PolicyType == "Voter"))
+
+# Raw Party ID scale (-3 to +3)
+dat_long <- dat_long %>% 
+  mutate(
+    PartyID_raw = case_when(
+      Q12 == 1 ~ -3,  # Strong Dem
+      Q12 == 2 ~ -2,
+      Q13 == 1 ~ -1,
+      Q13 == 3 ~  0,  # Independent
+      Q13 == 2 ~  1,
+      Q11 == 2 ~  2,
+      Q11 == 1 ~  3,  # Strong GOP
+      TRUE ~ NA_real_
+    )
+  )
+
+# Dichotomous Party label
+dat_long <- dat_long %>% 
+  mutate(
+    Party.1 = case_when(
+      Q12 == 1 ~ "Democrat",
+      Q12 == 2 ~ "Democrat",
+      Q13 == 1 ~ "Democrat",
+      Q13 == 3 ~ "Independent",
+      Q13 == 2 ~ "Republican",
+      Q11 == 2 ~ "Republican",
+      Q11 == 1 ~ "Republican",
+      TRUE     ~ NA_character_
+    )
+  )
+
+# Ideology (conservatism) scale (0 to +1)
+dat_long <- dat_long %>% 
+  mutate(
+    ideo = case_when(
+      Q14 == 1 ~ 0,
+      Q14 == 2 ~ .25,
+      Q14 == 3 ~  .5,
+      Q14 == 4 ~  .75,
+      Q14 == 5 ~  1,
+      TRUE ~ NA_real_
+    )
+  )
+
+# Recode DVs / mechanisms to -1 to +1
+shift_and_scale <- function(x) (x - 4) / 3 * c(-1, 1)[(x %in% c("Effective","Intention","Fair","Typical","Anger")) + 1]
+
+# Negative direction flips (Effective–Anger)
+flip_vars <- c("Effective", "Intention", "Fair", "Typical", "Anger")
+
+dat_long <- dat_long %>%
+  mutate(
+    Sup       = (Sup - 4) / 3,
+    Dem       = (Dem - 4) / 3,
+    across(all_of(flip_vars), \(x) ( (x - 4) * -1 ) / 3 )
+  )
+
+
+# ----- Inparty Advantage -----
+
+# Protection group: candidate vs inparty
+dat_long <- dat_long %>%
+  mutate(
+    InpartyAdv = case_when(
+      PolicyType == "Protection" & PaulCandidate == "Donald Trump" & Inparty == "Republican" ~  1,
+      PolicyType == "Protection" & PaulCandidate == "Joe Biden"     & Inparty == "Republican" ~ -1,
+      PolicyType == "Protection" & PaulCandidate == "Joe Biden"     & Inparty == "Democrat"   ~  1,
+      PolicyType == "Protection" & PaulCandidate == "Donald Trump"  & Inparty == "Democrat"   ~ -1,
+      PolicyType == "Protection" & PaulCandidate == "the senator"   ~  0,
+      TRUE ~ NA_real_
+    )
+  )
+
+# Voter group (Assembly dropped due to coding error)
+dat_long <- dat_long %>%
+  mutate(
+    InpartyAdv = case_when(
+      PolicyType == "Voter" & Paulgroup == "Republican"  & Inparty == "Republican" ~  1,
+      PolicyType == "Voter" & Paulgroup == "Democratic"  & Inparty == "Republican" ~ -1,
+      PolicyType == "Voter" & Paulgroup == "Democratic"  & Inparty == "Democrat"   ~  1,
+      PolicyType == "Voter" & Paulgroup == "Republican"  & Inparty == "Democrat"   ~ -1,
+      PolicyType == "Voter" & Paulgroup3 == "the political opposition"             ~  0,
+      TRUE ~ InpartyAdv  # keep Protection values
+    )
+  )
+
+# Review
+table(dat_long$InpartyAdv)
+
+```
+
+```{r Cleaning Part 2}
+
+# Drop Assembly condition (manipulation failed)
+dat_long_full <- dat_long   # keep full set for supplemental
+dat_long <- dat_long %>% filter(PolicyType != "Assemble")
+
+# Inparty dummies
+dat_long <- dat_long %>%
+  mutate(
+    InpartyAdv_Dum      = as.integer(InpartyAdv == 1),
+    InpartyDisadv_Dum   = as.integer(InpartyAdv == -1)
+  )
+
+# ----- Cleaning Part 2 -----
+
+# Remove pure independents
+N_original        <- nrow(dat_long)
+dat_long          <- dat_long %>% filter(PartyID_raw != 0)
+N_partisans       <- nrow(dat_long)
+N_independents    <- N_original - N_partisans
+N_independents
+
+# Exclude missing key variables
+N_original <- nrow(dat_long)
+
+dat_long <- dat_long %>%
+  filter(
+    !is.na(Sup),
+    !is.na(Dem),
+    !is.na(PolicyType),
+    !is.na(InpartyAdv),
+    !is.na(PartyID_raw)
+  )
+
+N_nonmissing <- nrow(dat_long)
+N_missing    <- N_original - N_nonmissing
+N_missing
+
+# Rescale PartyID_raw (-3 to 3) → equal intervals between -1 and 1
+dat_long <- dat_long %>%
+  mutate(
+    PartyID = case_when(
+      PartyID_raw == -3 ~ -1,
+      PartyID_raw == -2 ~ -0.6,
+      PartyID_raw == -1 ~ -0.2,
+      PartyID_raw ==  1 ~  0.2,
+      PartyID_raw ==  2 ~  0.6,
+      PartyID_raw ==  3 ~  1,
+      TRUE ~ NA_real_
+    )
+  )
+```
+
+```{r FUNCTION | apa_summary | Display in-text-style stats for regular and mixed effects models}
+# ----- Function: apa_summary() -----
+# Formats fixed effects into APA-style strings for in-text reporting.
+# Works with both regular linear models (lm) and mixed models (lmer).
+
+apa_summary <- function(model) {
+
+  # Extract fixed effects table
+  fe <- as.data.frame(summary(model)$coefficients)
+
+  # Pre-allocate formatted output
+  formatted <- character(nrow(fe))
+
+  for (i in seq_len(nrow(fe))) {
+
+    term <- rownames(fe)[i]
+    beta <- round(fe$Estimate[i], 2)
+    se   <- round(fe$`Std. Error`[i], 2)
+    pval <- fe$`Pr(>|t|)`[i]
+
+    # 95% CI
+    ci_lower <- round(beta - 1.96 * se, 2)
+    ci_upper <- round(beta + 1.96 * se, 2)
+
+    # APA p-value formatting
+    pval_formatted <- if (pval < .001) {
+      "p < .001"
+    } else if (pval < .05) {
+      sprintf("p = %.3f", pval)
+    } else {
+      sprintf("p = %.2f", pval)
+    }
+
+    # Construct final string
+    formatted[i] <- sprintf(
+      "%s: b = %.2f, SE = %.2f, 95%% CI [%.2f, %.2f], %s",
+      term, beta, se, ci_lower, ci_upper, pval_formatted
+    )
+  }
+
+  formatted
+}
+
+# ----- Example usage -----
+library(car)
+# Simple example with lm() using mtcars dataset
+example_model <- lm(mpg ~ cyl + disp + hp + wt, data = mtcars)
+apa_summary(example_model)
+```
+
+*Run all code above here*
+
+```{r Demographics}
+#### Check demographic distribution ####
+# Days
+result <- dat_long %>%
+  mutate(Date = as.Date(EndDate, format="%m/%d/%y %H:%M")) %>%
+  count(Date)
+print(result, n = Inf)
+
+# Democrats
+sum(dat_long$PartyID <= -1)
+round(sum(dat_long$PartyID <= -1)/nrow(dat_long)*100, 1)
+
+# Republicans
+sum(dat_long$PartyID >= 1)
+round(sum(dat_long$PartyID >= 1)/nrow(dat_long)*100, 1)
+
+# Calculate sample percentages
+age_dist <- round(table(dat_long$Q2) / nrow(dat_long) * 100, 0)
+gender_dist <- round(table(dat_long$Q3) / nrow(dat_long) * 100, 0)
+race_dist <- round(table(dat_long$Q5) / nrow(dat_long) * 100, 0)
+hispanic_dist <- round(table(dat_long$Q4) / nrow(dat_long) * 100, 0)
+
+# Combine the sample percentages into a single data frame
+demo_data <- data.frame(
+  Demographic = c("Asian", "Black or African American", "Middle Eastern or North African", "Native American", "Pacific Islander", "White", "Hispanic or Latino", "18-29 years", "30-44 years", "45-64 years", "65 years and older", "Female", "Male"),
+  Sample_Percentage = c(
+    race_dist[3], 
+    race_dist[2], 
+    race_dist[6], 
+    race_dist[4], 
+    race_dist[5], 
+    race_dist[1], 
+    hispanic_dist[1], 
+    age_dist[1], 
+    age_dist[2], 
+    age_dist[3], 
+    age_dist[4], 
+    gender_dist[1], 
+    gender_dist[2]
+  )
+)
+
+# Create a flextable
+ft_demographics <- flextable(demo_data) %>%
+  set_header_labels(Demographic = "Demographic", Sample_Percentage = "Sample Percentage (%)")
+
+ft_demographics
+```
+
+```{r Descriptives}
+
+# Quick helper to print summaries cleanly
+print_summary <- function(x) {
+  cat("\nMean:", round(mean(x, na.rm = TRUE), 2),
+      "\nSD:", round(sd(x, na.rm = TRUE), 2), "\n")
+  print(describe(x))
+}
+
+# Support
+print_summary(dat_long$Sup)
+hist(dat_long$Sup, main = "Distribution of Support", xlab = "Support")
+
+# Democracy
+print_summary(dat_long$Dem)
+hist(dat_long$Dem, main = "Distribution of Democracy", xlab = "Democracy")
+
+# Correlation between Support & Democracy
+cor(dat_long$Dem, dat_long$Sup, use = "complete.obs")
+
+```
+
+```{r Correlations}
+# Base correlations
+cormat <- dat_long %>%
+  dplyr::select(
+    PartyID,
+    InpartyAdv_Dum,
+    InpartyDisadv_Dum,
+    Dem,
+    Sup,
+    Voter2Dummy
+  )
+
+apa.cor.table(cormat)
+
+# ----- Conditional correlations -----
+
+# When advantage is *unspecified* (neutral)
+cormat_neutral <- dat_long %>%
+  filter(InpartyAdv_Dum == 0, InpartyDisadv_Dum == 0) %>%
+  dplyr::select(PartyID, Dem, Sup)
+
+apa.cor.table(cormat_neutral)
+
+# When advantageous
+cormat_adv <- dat_long %>%
+  filter(InpartyAdv_Dum == 1) %>%
+  dplyr::select(PartyID, Dem, Sup)
+
+apa.cor.table(cormat_adv)
+
+# When disadvantageous
+cormat_disadv <- dat_long %>%
+  filter(InpartyDisadv_Dum == 1) %>%
+  dplyr::select(PartyID, Dem, Sup)
+
+apa.cor.table(cormat_disadv)
+
+# ----- Additional checks -----
+
+# Distribution of support direction
+round(mean(dat_long$Sup < 0) * 100, 1)  # Oppose
+round(mean(dat_long$Sup > 0) * 100, 1)  # Support
+
+dat_advantage <- dat_long %>% filter(InpartyAdv == 1)
+round(mean(dat_advantage$Sup < 0) * 100, 1)  # Oppose among advantaged
+
+# Is ideology associated with (un)democratic attitudes?
+apa.cor.table(
+  dat_long %>% dplyr::select(ideo, Dem, Sup)
+)
+```
+
+***Main Analyses***
+
+```{r MAIN ANALYSES | DV: Support}
+# Ensure PolicyType is a factor
+dat_long$PolicyType <- factor(dat_long$PolicyType)
+
+# Main-effects model (Bipartisan Rationalization)
+mod_sup_main <- lm(
+  Sup ~ PartyID + PolicyType +
+    InpartyAdv_Dum + InpartyDisadv_Dum,
+  data = dat_long
+)
+
+summary(mod_sup_main)
+cat(apa_summary(mod_sup_main), sep = "\n")
+
+create_APA_regression_table(
+  mod_sup_main
+  # , file_name = "Model_Sup_Main.docx",
+  # save_to_word = TRUE
+)
+
+# Interaction model
+mod_sup_interact <- lm(
+  Sup ~ PartyID + PolicyType * PartyID +
+    InpartyAdv_Dum * PartyID +
+    InpartyDisadv_Dum * PartyID,
+  data = dat_long
+)
+
+summary(mod_sup_interact)
+cat(apa_summary(mod_sup_interact), sep = "\n")
+
+create_APA_regression_table(
+  mod_sup_interact
+  # , file_name = "Model_Sup_Interact.docx",
+  # save_to_word = TRUE
+)
+
+# Model comparison
+anova(mod_sup_interact, mod_sup_main)
+```
+
+```{r MAIN ANALYSES | DV: Perceived Democracy}
+
+# Main-effects model
+mod_dem_main <- lm(
+  Dem ~ PartyID + PolicyType +
+    InpartyAdv_Dum + InpartyDisadv_Dum,
+  data = dat_long
+)
+
+summary(mod_dem_main)
+cat(apa_summary(mod_dem_main), sep = "\n")
+
+create_APA_regression_table(
+  mod_dem_main
+  # , file_name = "Model_Dem_Main.docx",
+  # save_to_word = TRUE
+)
+
+# Interaction model
+mod_dem_interact <- lm(
+  Dem ~ PartyID + PolicyType * PartyID +
+    InpartyAdv_Dum * PartyID +
+    InpartyDisadv_Dum * PartyID,
+  data = dat_long
+)
+
+summary(mod_dem_interact)
+cat(apa_summary(mod_dem_interact), sep = "\n")
+
+create_APA_regression_table(
+  mod_dem_interact
+  # , file_name = "Model_Dem_Interact.docx",
+  # save_to_word = TRUE
+)
+
+# Model comparison
+anova(mod_dem_interact, mod_dem_main)
+```
+
+Figure 4
+```{r GRAPH | Sup by Policy Type & Party | Jittered raw data with CIs | Grayscale-friendly}
+# Color + shape (grayscale-friendly, no CI linetype differences)
+my_plot <- ggplot(
+  dat_long,
+  aes(x = Party.1, y = Sup)
+) +
+  geom_jitter(
+    aes(color = Party.1, shape = Party.1, fill = Party.1),
+    width  = 0.35,
+    alpha  = 0.35,
+    size   = 1.2,
+    stroke = 0.6
+  ) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom     = "errorbar",
+    width    = 0.5,
+    color    = "black",
+    size     = 0.6
+  ) +
+  stat_summary(
+    fun   = mean,
+    geom  = "point",
+    shape = 21,
+    fill  = "black",
+    color = "black",
+    size  = 2,
+    inherit.aes = FALSE,
+    aes(x = Party.1, y = Sup)
+  ) +
+  facet_wrap(~ PolicyType, ncol = 3, switch = "x", 
+             labeller = labeller(PolicyType = c("Protection" = "Political\nProtections",
+                           "Voter" = "Voter\nAccess")))  +
+  # Color for online version, shape for grayscale version
+  scale_color_manual(
+    name   = "Party Affiliation",
+    values = c(
+      "Democrat"   = "#377eb8",
+      "Republican" = "#e41a1c"
+    )
+  ) +
+  scale_fill_manual(
+    name   = "Party Affiliation",
+    values = c(
+      "Democrat"   = "#377eb8",
+      "Republican" = "#e41a1c"
+    )
+  ) +
+  scale_shape_manual(
+    name   = "Party Affiliation",
+    values = c(
+      "Democrat"   = 21,  # circle
+      "Republican" = 24   # triangle
+    )
+  ) +
+  labs(
+    x = NULL,
+    y = "Oppose      |     Support ",
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5, stroke = 1)),
+    shape = guide_legend(override.aes = list(size = 5, stroke = 1)),
+    fill  = "none"
+  ) +
+  theme_minimal() +
+  theme(
+    text             = element_text(size = 16),
+    axis.text.x      = element_blank(),
+    axis.title.y     = element_text(size = 14),
+    legend.title     = element_text(size = 16),
+    legend.text      = element_text(size = 16),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background  = element_rect(fill = "white", color = NA)
+  )
+my_plot
+
+# ggsave(
+#   "Figure4.jpg",
+#   plot   = my_plot,
+#   width  = 10,
+#   height = 6,
+#   dpi    = 300
+# )
+```
+
+Figure 5
+```{r GRAPH | Sup by Inparty Advantage & Party | Jittered raw data with CIs | Grayscale-friendly}
+# Color + shape (grayscale-friendly, no CI linetype differences)
+my_plot <- ggplot(
+  dat_long,
+  aes(x = Party.1, y = Sup)
+) +
+  geom_jitter(
+    aes(color = Party.1, shape = Party.1, fill = Party.1),
+    width  = 0.35,
+    alpha  = 0.35,
+    size   = 1.2,
+    stroke = 0.6
+  ) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom     = "errorbar",
+    width    = 0.5,
+    color    = "black",
+    size     = 0.6
+  ) +
+  stat_summary(
+    fun   = mean,
+    geom  = "point",
+    shape = 21,
+    fill  = "black",
+    color = "black",
+    size  = 2,
+    inherit.aes = FALSE,
+    aes(x = Party.1, y = Sup)
+  ) +
+  facet_wrap(~ InpartyAdv, ncol = 3, switch = "x", 
+             labeller = labeller(InpartyAdv = c(
+               `-1` = "Hurt\nInparty", 
+               `0` = "Neutral", 
+               `1` = "Help\nInparty"))) +
+  # Color for online version, shape for grayscale version
+  scale_color_manual(
+    name   = "Party Affiliation",
+    values = c(
+      "Democrat"   = "#377eb8",
+      "Republican" = "#e41a1c"
+    )
+  ) +
+  scale_fill_manual(
+    name   = "Party Affiliation",
+    values = c(
+      "Democrat"   = "#377eb8",
+      "Republican" = "#e41a1c"
+    )
+  ) +
+  scale_shape_manual(
+    name   = "Party Affiliation",
+    values = c(
+      "Democrat"   = 21,  # circle
+      "Republican" = 24   # triangle
+    )
+  ) +
+  labs(
+    x = NULL,
+    y = "Oppose      |     Support ",
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5, stroke = 1)),
+    shape = guide_legend(override.aes = list(size = 5, stroke = 1)),
+    fill  = "none"
+  ) +
+  theme_minimal() +
+  theme(
+    text             = element_text(size = 16),
+    axis.text.x      = element_blank(),
+    axis.title.y     = element_text(size = 14),
+    legend.title     = element_text(size = 16),
+    legend.text      = element_text(size = 16),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background  = element_rect(fill = "white", color = NA)
+  )
+my_plot
+
+
+# ggsave(
+#   "Figure5.jpg",
+#   plot   = my_plot,
+#   width  = 10,
+#   height = 6,
+#   dpi    = 300
+# )
+```
+
+```{r Supplemental Analyses #6 | Iterate Analyses w/ Alternative Outcomes}
+alt_outcomes <- c("Effective", "Intention", "Anger", "MC", "Fair", "Typical")
+
+for (outcome in alt_outcomes) {
+  cat("\n\n==========================\n")
+  cat("Outcome:", outcome, "\n")
+  cat("==========================\n\n")
+  
+  # Define model formulas dynamically
+  formula1 <- as.formula(paste(outcome, "~ PartyID + PolicyType + InpartyAdv_Dum + InpartyDisadv_Dum"))
+  formula2 <- as.formula(paste(outcome, "~ PartyID + PolicyType*PartyID + InpartyAdv_Dum*PartyID + InpartyDisadv_Dum*PartyID"))
+  
+  # Fit models
+  model_main <- lm(formula1, data = dat_long)
+  model_int <- lm(formula2, data = dat_long)
+  
+  # Print summaries
+  cat("Main Effects Summary:\n")
+  print(summary(model_main))
+  cat(apa_summary(model_main), sep = "\n")
+  
+  cat("\nInteractions Summary:\n")
+  print(summary(model_int))
+  cat(apa_summary(model_int), sep = "\n")
+  
+  # Save regression tables to Word
+  create_APA_regression_table(model_main, 
+                              file_name = paste0("model_main_", outcome, ".docx"), 
+                              save_to_word = FALSE) # change to save models
+  
+  create_APA_regression_table(model_int, 
+                              file_name = paste0("model_int_", outcome, ".docx"), 
+                              save_to_word = FALSE)
+  
+  # Compare models
+  cat("\nModel Comparison (ANOVA):\n")
+  print(anova(model_main, model_int))
+}
+```
+
+```{r Supplemental Analyses | DV: Fairness}
+# Ensure PolicyType is a factor
+dat_long$PolicyType <- factor(dat_long$PolicyType)
+
+# Main-effects model
+mod_fair_main <- lm(
+  Fair ~ PartyID + PolicyType +
+    InpartyAdv_Dum + InpartyDisadv_Dum,
+  data = dat_long
+)
+
+summary(mod_fair_main)
+cat(apa_summary(mod_fair_main), sep = "\n")
+
+create_APA_regression_table(
+  mod_fair_main
+  # , file_name = "Model_Fair_Main.docx",
+  # save_to_word = TRUE
+)
+
+# Interaction model
+mod_fair_interact <- lm(
+  Fair ~ PartyID + PolicyType * PartyID +
+    InpartyAdv_Dum * PartyID +
+    InpartyDisadv_Dum * PartyID,
+  data = dat_long
+)
+
+summary(mod_fair_interact)
+cat(apa_summary(mod_fair_interact), sep = "\n")
+
+create_APA_regression_table(
+  mod_fair_interact
+  # , file_name = "Model_Fair_Interact.docx",
+  # save_to_word = TRUE
+)
+
+# Model comparison
+anova(mod_fair_interact, mod_fair_main)
+```
