@@ -39,7 +39,7 @@ output/
 figures 1-5
 
 paper/
-Democracy_ACCEPTED.pdf
+Teas_Partisan_or_principled_ACCEPTED.pdf
 
 ---
 
