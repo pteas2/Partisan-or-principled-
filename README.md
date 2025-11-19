@@ -36,8 +36,7 @@ Democracy_S2.csv
 Study2_Analyses_CLEAN.Rmd
 
 output/
-study1/
-study2/
+figures 1-5
 
 paper/
 Democracy_ACCEPTED.pdf
